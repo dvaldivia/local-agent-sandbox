@@ -133,7 +133,8 @@ against real containers — the strongest "the SDK can't tell the difference" si
 ## Limitations
 
 - Single-container pods (extra containers are logged and ignored).
-- Volume sources: PVC and emptyDir only (configMap/secret/downwardAPI unsupported).
+- Volume sources: PVC (volumeClaimTemplates and pre-existing PVCs by claimName, each backed by a
+  Docker named volume) and emptyDir; configMap/secret/downwardAPI unsupported.
 - Gateway connection mode is not emulated (Direct and tunnel modes are supported).
 - The Python SDK's in-cluster connection strategy is cluster-only and not applicable locally.
 - Not a security boundary — sandboxes are ordinary local containers.

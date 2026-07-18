@@ -44,7 +44,7 @@ jobs:
       - name: Docker-backed driver/reconciler/E2E tests
         env:
           LASD_DOCKER_TESTS: "1"
-        run: go test -count=1 -timeout 20m ./internal/driver/... ./internal/reconciler/... ./test/e2e/...
+        run: go test -count=1 -timeout 20m -p 1 ./internal/driver/... ./internal/reconciler/... ./internal/portforward/... ./test/e2e/...
 
   integration-macos:
     runs-on: macos-latest
@@ -60,4 +60,4 @@ jobs:
       - name: Docker-backed tests
         env:
           LASD_DOCKER_TESTS: "1"
-        run: go test -count=1 -timeout 25m ./internal/driver/... ./test/e2e/...
+        run: go test -count=1 -timeout 25m -p 1 ./internal/driver/... ./test/e2e/...

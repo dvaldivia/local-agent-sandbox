@@ -18,6 +18,7 @@ Served by the kube-facade. The SDKs and kubectl treat `lasd` as a Kubernetes API
 | OpenAPI v3 (`/openapi/v3`) | ✅ | permissive schemas + per-GVK path with `fieldValidation` so `kubectl apply` validates |
 | OpenAPI v2 (`/openapi/v2`) | ❌ | not served (protobuf-only); a valid v3 doc prevents kubectl fallback |
 | core `pods`/`services`/`namespaces`, `discovery.k8s.io/v1 endpointslices` | ✅ (subset) | used by tunnel discovery + virtual router objects |
+| core `persistentvolumeclaims` | ✅ | each PVC is backed by a docker named volume (`las-<ns>-<name>`) and reported `Bound`; deleting the PVC removes the volume (best-effort while in use) |
 | `pods/{name}/portforward` | ✅ | SPDY, only for the virtual `sandbox-router-0` pod |
 | `gateways` (`gateway.networking.k8s.io/v1`) | ⚠️ stub | GVR served so watches don't 404; gateway mode not emulated |
 | Strategic-merge patch for core types | ⚠️ | treated as JSON merge patch (fine for CRDs; approximate for pods/services) |
@@ -46,7 +47,8 @@ Verified against the upstream agent-sandbox controllers (see `plans/03-reconcile
 | Failure reasons `WarmPoolNotFound` / `TemplateNotFound` (Python SDK string-matches) | ✅ |
 | Sandbox conditions Ready/Suspended/Finished with upstream reasons | ✅ |
 | `agents.x-k8s.io/pod-name` annotation; `status.selector` = name-hash label | ✅ |
-| VolumeClaimTemplates → PVC `<tmpl>-<sandbox>` → docker volume; fsGroup-style chown | ✅ |
+| VolumeClaimTemplates → sandbox-owned PVC object `<tmpl>-<sandbox>` → docker volume; fsGroup-style chown | ✅ |
+| Pre-existing PVCs referenced by `claimName` mount their volume; sandbox stays NotReady until the PVC exists; user PVCs survive sandbox deletion | ✅ |
 | OperatingMode Suspend (remove container, keep volumes) / Resume | ✅ |
 | Lifecycle `shutdownTime` + `shutdownPolicy` (Delete/Retain), claim `ttlSecondsAfterFinished` | ✅ |
 | Secure defaults: `automountServiceAccountToken=false`, managed DNS (8.8.8.8/1.1.1.1) | ✅ |
@@ -61,6 +63,9 @@ Verified against the upstream agent-sandbox controllers (see `plans/03-reconcile
   recycling is best-effort).
 - Single-container pods only; multi-container is logged and the first container is run.
 - `status.selector` is not cleared on pod loss (matches an upstream quirk); wiped on expiry.
+- Disk-backed `emptyDir` is approximated as tmpfs (pod-lifetime scratch either way).
+- PVC `storageClassName`/`accessModes`/capacity are recorded but not enforced — every PVC binds to
+  an unbounded local Docker volume.
 
 ## Upstream pin
 

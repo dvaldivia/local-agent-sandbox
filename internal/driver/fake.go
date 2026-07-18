@@ -28,6 +28,7 @@ import (
 type FakeDriver struct {
 	mu         sync.Mutex
 	containers map[string]*ContainerInfo // key: ns/name
+	specs      map[string]SandboxContainerSpec
 	volumes    map[string]VolumeSpec
 	nextPort   int
 	events     chan Event
@@ -44,6 +45,7 @@ type FakeDriver struct {
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
 		containers: map[string]*ContainerInfo{},
+		specs:      map[string]SandboxContainerSpec{},
 		volumes:    map[string]VolumeSpec{},
 		nextPort:   40000,
 		events:     make(chan Event, 128),
@@ -87,7 +89,17 @@ func (f *FakeDriver) CreateSandboxContainer(_ context.Context, spec SandboxConta
 		}
 	}
 	f.containers[fkey(spec.Namespace, spec.SandboxName)] = info
+	f.specs[fkey(spec.Namespace, spec.SandboxName)] = spec
 	return *info, nil
+}
+
+// LastSpec returns the spec most recently used to create a sandbox's container
+// (test helper for asserting mounts, env, etc.).
+func (f *FakeDriver) LastSpec(ns, name string) (SandboxContainerSpec, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.specs[fkey(ns, name)]
+	return s, ok
 }
 
 func (f *FakeDriver) InspectSandbox(_ context.Context, ns, name string) (ContainerInfo, error) {

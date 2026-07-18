@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -75,6 +76,74 @@ func mkTemplate(t *testing.T, st *store.Store, ns, name string) {
 	if _, err := st.Create(apis.TemplateGVR, u); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// mkTemplatePVCRef creates a template whose pod references a pre-existing PVC
+// by claimName and mounts it at /shared.
+func mkTemplatePVCRef(t *testing.T, st *store.Store, ns, name, claimName string) {
+	t.Helper()
+	tmpl := &extv1beta1.SandboxTemplate{}
+	tmpl.APIVersion = apis.ExtensionsGV()
+	tmpl.Kind = "SandboxTemplate"
+	tmpl.Namespace = ns
+	tmpl.Name = name
+	tmpl.Spec.PodTemplate.Spec.Volumes = []corev1.Volume{{
+		Name: "shared",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+		},
+	}}
+	tmpl.Spec.PodTemplate.Spec.Containers = []corev1.Container{{
+		Name: "runtime", Image: "img",
+		Ports:        []corev1.ContainerPort{{ContainerPort: 8888}},
+		VolumeMounts: []corev1.VolumeMount{{Name: "shared", MountPath: "/shared"}},
+	}}
+	u, err := toUnstructured(tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(apis.TemplateGVR, u); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mkPVC(t *testing.T, st *store.Store, ns, name string) {
+	t.Helper()
+	pvc := &corev1.PersistentVolumeClaim{}
+	pvc.APIVersion = "v1"
+	pvc.Kind = "PersistentVolumeClaim"
+	pvc.Namespace = ns
+	pvc.Name = name
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	u, err := toUnstructured(pvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(apis.PVCGVR, u); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func unstructuredNestedString(u *unstructured.Unstructured, fields ...string) (string, bool, error) {
+	return unstructured.NestedString(u.Object, fields...)
+}
+
+func findClaimReady(c *extv1beta1.SandboxClaim) *metav1.Condition {
+	return meta.FindStatusCondition(c.Status.Conditions, "Ready")
+}
+
+func hasVolume(t *testing.T, fd *driver.FakeDriver, name string) bool {
+	t.Helper()
+	vols, err := fd.ListManagedVolumes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vols {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func mkWarmPool(t *testing.T, st *store.Store, ns, name, tmplName string, replicas int32) {
@@ -229,6 +298,116 @@ func TestWarmPoolMaintainsReplicas(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("warm pool never reached 2 replicas")
+}
+
+// TestPVCBackedByVolume: a user-created PVC gets a docker volume and Bound status.
+func TestPVCBackedByVolume(t *testing.T) {
+	st, fd, _ := newHarness(t)
+	mkPVC(t, st, "default", "user-data")
+
+	volName := driver.VolumeName("default", "user-data")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		u, err := st.Get(apis.PVCGVR, "default", "user-data")
+		if err == nil && hasVolume(t, fd, volName) {
+			if phase, _, _ := unstructuredNestedString(u, "status", "phase"); phase == "Bound" {
+				return
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatal("PVC never became Bound with a backing docker volume")
+}
+
+// TestSandboxVCTCreatesPVCObject: a claim with volumeClaimTemplates yields a
+// sandbox-owned PVC object (<tmpl>-<sandbox>) + volume; deleting the claim
+// cascades to both.
+func TestSandboxVCTCreatesPVCObject(t *testing.T) {
+	st, fd, _ := newHarness(t)
+	mkTemplate(t, st, "default", "default")
+	mkWarmPool(t, st, "default", "default", "default", 0)
+	mkClaim(t, st, "default", "c-vct", "default", func(c *extv1beta1.SandboxClaim) {
+		c.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}}
+	})
+	waitClaim(t, st, "default", "c-vct", claimReady, 5*time.Second)
+
+	pvcName := "data-c-vct"
+	volName := driver.VolumeName("default", pvcName)
+	pu, err := st.Get(apis.PVCGVR, "default", pvcName)
+	if err != nil {
+		t.Fatalf("VCT PVC object not materialized: %v", err)
+	}
+	if !ownedBy(pu, "Sandbox", "c-vct") {
+		t.Errorf("VCT PVC not owned by the sandbox: %+v", pu.GetOwnerReferences())
+	}
+	if !hasVolume(t, fd, volName) {
+		t.Error("VCT docker volume missing")
+	}
+
+	if _, err := st.Delete(apis.SandboxClaimGVR, "default", "c-vct"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, perr := st.Get(apis.PVCGVR, "default", pvcName)
+		if perr != nil && !hasVolume(t, fd, volName) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("claim delete did not cascade to the VCT PVC object + volume")
+}
+
+// TestSandboxPreexistingPVC: a pod referencing a user PVC by claimName stays
+// NotReady until the PVC exists, then mounts its volume; deleting the claim
+// leaves the user PVC and volume intact.
+func TestSandboxPreexistingPVC(t *testing.T) {
+	st, fd, _ := newHarness(t)
+	mkTemplatePVCRef(t, st, "default", "pvc-tmpl", "shared-data")
+	mkWarmPool(t, st, "default", "pvc-pool", "pvc-tmpl", 0)
+	mkClaim(t, st, "default", "c-pre", "pvc-pool", nil)
+
+	// Blocked while the PVC is missing (claim mirrors the sandbox condition).
+	c := waitClaim(t, st, "default", "c-pre", claimReasonIs("DependenciesNotReady"), 5*time.Second)
+	rc := findClaimReady(c)
+	if rc == nil || !strings.Contains(rc.Message, "persistentvolumeclaim") {
+		t.Fatalf("expected pvc-not-found message, got %+v", rc)
+	}
+
+	// Create the PVC → sandbox proceeds and mounts the derived volume.
+	mkPVC(t, st, "default", "shared-data")
+	waitClaim(t, st, "default", "c-pre", claimReady, 5*time.Second)
+	spec, ok := fd.LastSpec("default", "c-pre")
+	if !ok {
+		t.Fatal("no container spec recorded")
+	}
+	wantVol := driver.VolumeName("default", "shared-data")
+	found := false
+	for _, m := range spec.Mounts {
+		if m.VolumeName == wantVol && m.MountPath == "/shared" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("container does not mount %s: %+v", wantVol, spec.Mounts)
+	}
+
+	// Deleting the claim must NOT delete the user's PVC or its volume.
+	if _, err := st.Delete(apis.SandboxClaimGVR, "default", "c-pre"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, err := st.Get(apis.PVCGVR, "default", "shared-data"); err != nil {
+		t.Errorf("pre-existing PVC was deleted by the sandbox cascade: %v", err)
+	}
+	if !hasVolume(t, fd, wantVol) {
+		t.Error("pre-existing PVC's docker volume was deleted by the sandbox cascade")
+	}
 }
 
 // TestClaimAdoptsWarmSandbox covers the warm-pool adoption path (replicas>0):

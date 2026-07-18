@@ -108,16 +108,41 @@ func (r *Reconcilers) reconcileRunning(ctx context.Context, u *unstructured.Unst
 		return r.failReady(u, sb, "Pod spec has no containers"), nil
 	}
 
-	// Ensure PVC-equivalent volumes and inject the pod volume entries.
-	volNames := map[string]string{}
+	// Materialize PVC objects for volumeClaimTemplates (upstream naming
+	// <templateName>-<sandboxName>, controller-owned by the sandbox) and inject
+	// the corresponding pod volume entries (StatefulSet semantics).
 	for _, vct := range sb.Spec.VolumeClaimTemplates {
-		pvc := vct.Name + "-" + name
-		dv := driver.VolumeName(ns, pvc)
-		if _, err := r.Driver.EnsureVolume(ctx, driver.VolumeSpec{Name: dv, Namespace: ns, PVCName: pvc}); err != nil {
+		pvcName := vct.Name + "-" + name
+		r.ensureVCTPVCObject(u, vct, pvcName)
+		podSpec = injectPodVolume(podSpec, vct.Name, pvcName)
+	}
+
+	// Every PVC the pod references — VCT-derived or pre-existing — must have a
+	// PVC object; back each with its docker volume before mapping. A missing
+	// PVC leaves the sandbox NotReady (upstream: the pod stays Pending on an
+	// unbound claim) rather than starting the container without the mount.
+	for _, vol := range podSpec.Volumes {
+		if vol.PersistentVolumeClaim == nil {
+			continue
+		}
+		claim := vol.PersistentVolumeClaim.ClaimName
+		if _, err := r.Store.Get(apis.PVCGVR, ns, claim); apierrors.IsNotFound(err) {
+			conds := sb.Status.Conditions
+			setCond(&conds, sandboxv1beta1.SandboxConditionReady, metav1.ConditionFalse,
+				sandboxv1beta1.SandboxReasonDependenciesNotReady,
+				fmt.Sprintf("persistentvolumeclaim %q not found", claim), sb.Generation, r.now())
+			if err := r.writeSandboxStatus(u, sandboxv1beta1.SandboxStatus{Conditions: conds}); err != nil {
+				return Result{}, err
+			}
+			return Result{RequeueAfter: readyRequeue}, nil
+		} else if err != nil {
 			return Result{}, err
 		}
-		volNames[vct.Name] = dv
-		podSpec = injectPodVolume(podSpec, vct.Name, pvc)
+		if _, err := r.Driver.EnsureVolume(ctx, driver.VolumeSpec{
+			Name: driver.VolumeName(ns, claim), Namespace: ns, PVCName: claim,
+		}); err != nil {
+			return Result{}, err
+		}
 	}
 
 	image := podSpec.Containers[0].Image
@@ -129,7 +154,7 @@ func (r *Reconcilers) reconcileRunning(ctx context.Context, u *unstructured.Unst
 	if errors.Is(err, driver.ErrNotFound) {
 		spec, warnings, mErr := driver.MapPodSpec(podSpec, driver.MappingMeta{
 			Namespace: ns, SandboxName: name, UID: string(sb.UID),
-			ServerPort: podServerPort(podSpec, r.serverPort()), VolumeNames: volNames,
+			ServerPort: podServerPort(podSpec, r.serverPort()),
 		}, r.serverPort())
 		if mErr != nil {
 			return r.failReady(u, sb, mErr.Error()), nil // fatal mapping error: no retry storm
@@ -350,8 +375,13 @@ func nameHash(name string) string {
 	return fmt.Sprintf("%08x", h.Sum32())
 }
 
+// sandboxNameHashLabel tracks which sandbox owns a pod-equivalent/PVC (the
+// upstream controller's tracking label; the python SDK parses status.selector
+// as this key=value pair).
+const sandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
+
 func nameHashSelector(name string) string {
-	return "agents.x-k8s.io/sandbox-name-hash=" + nameHash(name)
+	return sandboxNameHashLabel + "=" + nameHash(name)
 }
 
 func podServerPort(podSpec corev1.PodSpec, def int) int {

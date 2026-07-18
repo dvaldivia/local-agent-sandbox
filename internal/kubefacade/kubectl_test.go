@@ -73,6 +73,22 @@ spec: {warmPoolRef: {name: default}}
 	} else if !strings.Contains(out, "default") {
 		t.Fatalf("kubectl get missing template: %s", out)
 	}
+	// PVC facade: apply + get by shortname.
+	const pvc = `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: shared-data, namespace: default}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+`
+	if out, err := run(pvc, "apply", "-f", "-"); err != nil {
+		t.Fatalf("kubectl apply pvc failed: %v\n%s", err, out)
+	}
+	if out, err := run("", "get", "pvc", "shared-data"); err != nil {
+		t.Fatalf("kubectl get pvc failed: %v\n%s", err, out)
+	} else if !strings.Contains(out, "shared-data") {
+		t.Fatalf("kubectl get pvc missing object: %s", out)
+	}
 	// delete.
 	if out, err := run("", "delete", "sandboxtemplate", "default"); err != nil {
 		t.Fatalf("kubectl delete failed: %v\n%s", err, out)

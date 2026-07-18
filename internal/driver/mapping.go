@@ -21,16 +21,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// MappingMeta carries the sandbox identity and resolved volume names needed to
-// map a pod spec into a container spec.
+// MappingMeta carries the sandbox identity needed to map a pod spec into a
+// container spec.
 type MappingMeta struct {
 	Namespace   string
 	SandboxName string
 	UID         string
 	ServerPort  int
-	// VolumeNames maps a pod volume name (PVC template name) to the docker
-	// volume name the reconciler created for it.
-	VolumeNames map[string]string
 	// ExtraLabels are merged onto the container (e.g. propagated pod labels).
 	ExtraLabels   map[string]string
 	InjectRuntime bool
@@ -127,28 +124,26 @@ func MapPodSpec(podSpec corev1.PodSpec, meta MappingMeta, defaultServerPort int)
 		}
 		switch {
 		case vol.PersistentVolumeClaim != nil:
-			dockerVol := meta.VolumeNames[vm.Name]
-			if dockerVol == "" {
-				warnings = append(warnings, fmt.Sprintf("volume %q has no resolved docker volume; skipped", vm.Name))
+			// Any PVC reference — whether injected from a volumeClaimTemplate
+			// or a pre-existing user-created PVC — maps to the docker volume
+			// derived from its claimName. The reconciler validates that the
+			// PVC object exists and ensures the volume before mapping.
+			claim := vol.PersistentVolumeClaim.ClaimName
+			if claim == "" {
+				warnings = append(warnings, fmt.Sprintf("volume %q has an empty persistentVolumeClaim.claimName; skipped", vm.Name))
 				continue
 			}
-			spec.Mounts = append(spec.Mounts, Mount{VolumeName: dockerVol, MountPath: vm.MountPath, ReadOnly: vm.ReadOnly})
+			spec.Mounts = append(spec.Mounts, Mount{
+				VolumeName: VolumeName(meta.Namespace, claim),
+				MountPath:  vm.MountPath,
+				ReadOnly:   vm.ReadOnly || vol.PersistentVolumeClaim.ReadOnly,
+			})
 		case vol.EmptyDir != nil:
-			m := Mount{MountPath: vm.MountPath, ReadOnly: vm.ReadOnly}
-			if vol.EmptyDir.Medium == corev1.StorageMediumMemory {
-				m.Tmpfs = true
-				if vol.EmptyDir.SizeLimit != nil {
-					m.TmpfsSizeBytes = vol.EmptyDir.SizeLimit.Value()
-				}
-			} else {
-				// Disk emptyDir → anonymous named volume via the reconciler;
-				// if none resolved, fall back to tmpfs semantics unbounded.
-				dockerVol := meta.VolumeNames[vm.Name]
-				if dockerVol != "" {
-					m.VolumeName = dockerVol
-				} else {
-					m.Tmpfs = true
-				}
+			// emptyDir is pod-lifetime scratch space; a tmpfs mount matches
+			// that (disk-backed emptyDir is approximated as tmpfs too).
+			m := Mount{MountPath: vm.MountPath, ReadOnly: vm.ReadOnly, Tmpfs: true}
+			if vol.EmptyDir.Medium == corev1.StorageMediumMemory && vol.EmptyDir.SizeLimit != nil {
+				m.TmpfsSizeBytes = vol.EmptyDir.SizeLimit.Value()
 			}
 			spec.Mounts = append(spec.Mounts, m)
 		default:

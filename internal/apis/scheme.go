@@ -90,6 +90,7 @@ var (
 	NamespaceGVR     = GVR{"", "v1", "namespaces"}
 	PodGVR           = GVR{"", "v1", "pods"}
 	ServiceGVR       = GVR{"", "v1", "services"}
+	PVCGVR           = GVR{"", "v1", "persistentvolumeclaims"}
 	EndpointSliceGVR = GVR{GroupDiscovery, "v1", "endpointslices"}
 	GatewayGVR       = GVR{GroupGateway, "v1", "gateways"}
 )
@@ -113,6 +114,7 @@ func NewDefaultRegistry() *Registry {
 		{GVR: NamespaceGVR, Kind: "Namespace", ListKind: "NamespaceList", Singular: "namespace", ShortNames: []string{"ns"}, Namespaced: false, HasStatus: true},
 		{GVR: PodGVR, Kind: "Pod", ListKind: "PodList", Singular: "pod", ShortNames: []string{"po"}, Namespaced: true, HasStatus: true},
 		{GVR: ServiceGVR, Kind: "Service", ListKind: "ServiceList", Singular: "service", ShortNames: []string{"svc"}, Namespaced: true, HasStatus: true},
+		{GVR: PVCGVR, Kind: "PersistentVolumeClaim", ListKind: "PersistentVolumeClaimList", Singular: "persistentvolumeclaim", ShortNames: []string{"pvc"}, Namespaced: true, HasStatus: true},
 		{GVR: EndpointSliceGVR, Kind: "EndpointSlice", ListKind: "EndpointSliceList", Singular: "endpointslice", ShortNames: []string{"eps"}, Namespaced: true},
 		{GVR: GatewayGVR, Kind: "Gateway", ListKind: "GatewayList", Singular: "gateway", ShortNames: []string{"gtw"}, Namespaced: true, HasStatus: true},
 	}

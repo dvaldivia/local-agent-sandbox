@@ -90,6 +90,7 @@ func (r *Reconcilers) Wire(m *Manager) {
 	m.Register("sandboxwarmpool", apis.WarmPoolGVR, r.reconcileWarmPool, 2,
 		Source(apis.SandboxGVR, ownerMap("SandboxWarmPool")))
 	m.Register("sandboxtemplate", apis.TemplateGVR, r.reconcileTemplate, 1)
+	m.Register("persistentvolumeclaim", apis.PVCGVR, r.reconcilePVC, 2)
 }
 
 // StartDriverEvents bridges Docker lifecycle events into sandbox reconciles so
@@ -121,11 +122,14 @@ func (r *Reconcilers) OnDelete(gvr apis.GVR, obj *unstructured.Unstructured) {
 		r.cascadeClaimDelete(ctx, obj)
 	case apis.WarmPoolGVR:
 		r.cascadeWarmPoolDelete(ctx, obj)
+	case apis.PVCGVR:
+		r.cleanupPVCVolume(ctx, obj)
 	}
 }
 
-// cleanupSandboxResources removes the container and PVC-equivalent volumes for
-// a deleted Sandbox.
+// cleanupSandboxResources removes the container and VCT-derived PVCs for a
+// deleted Sandbox. Pre-existing (user-created) PVCs referenced by the pod are
+// deliberately left alone — they outlive the sandbox, like in Kubernetes.
 func (r *Reconcilers) cleanupSandboxResources(ctx context.Context, obj *unstructured.Unstructured) {
 	ns, name := obj.GetNamespace(), obj.GetName()
 	if info, err := r.Driver.InspectSandbox(ctx, ns, name); err == nil {
@@ -134,17 +138,47 @@ func (r *Reconcilers) cleanupSandboxResources(ctx context.Context, obj *unstruct
 	var sb sandboxv1beta1.Sandbox
 	if err := fromUnstructured(obj, &sb); err == nil {
 		for _, vct := range sb.Spec.VolumeClaimTemplates {
-			pvc := vct.Name + "-" + name
-			_ = r.Driver.RemoveVolume(ctx, driver.VolumeName(ns, pvc))
+			pvcName := vct.Name + "-" + name
+			// Delete the sandbox-owned PVC object (its delete hook removes the
+			// docker volume); guard on ownership so a same-named user PVC is
+			// never destroyed.
+			if pu, gerr := r.Store.Get(apis.PVCGVR, ns, pvcName); gerr == nil {
+				if controllerOwnerUID(pu) == string(obj.GetUID()) {
+					_, _ = r.Store.Delete(apis.PVCGVR, ns, pvcName)
+				}
+				continue
+			}
+			// No PVC object (pre-PVC-facade state): remove the volume directly.
+			_ = r.Driver.RemoveVolume(ctx, driver.VolumeName(ns, pvcName))
 		}
 	}
 }
 
-// cascadeClaimDelete deletes the Sandbox owned by a deleted claim.
+// cleanupPVCVolume removes the docker volume backing a deleted PVC. Best
+// effort: docker refuses to remove a volume still mounted by a container; the
+// leftover is labeled las.managed and reclaimable via `lasd purge`.
+func (r *Reconcilers) cleanupPVCVolume(ctx context.Context, obj *unstructured.Unstructured) {
+	vol := driver.VolumeName(obj.GetNamespace(), obj.GetName())
+	if err := r.Driver.RemoveVolume(ctx, vol); err != nil {
+		r.Log.Warn("pvc delete: could not remove docker volume (possibly in use)", "volume", vol, "err", err)
+	}
+}
+
+// cascadeClaimDelete deletes the Sandbox owned by a deleted claim (ownership
+// verified by controller ownerReference UID so a foreign same-named sandbox is
+// never destroyed).
 func (r *Reconcilers) cascadeClaimDelete(ctx context.Context, obj *unstructured.Unstructured) {
 	sbName, _, _ := unstructured.NestedString(obj.Object, "status", "sandbox", "name")
 	if sbName == "" {
 		sbName = obj.GetName() // cold-start default
+	}
+	sbU, err := r.Store.Get(apis.SandboxGVR, obj.GetNamespace(), sbName)
+	if err != nil {
+		return
+	}
+	if controllerOwnerUID(sbU) != string(obj.GetUID()) {
+		r.Log.Warn("cascade claim delete: sandbox not owned by this claim; skipping", "sandbox", sbName)
+		return
 	}
 	if _, err := r.Store.Delete(apis.SandboxGVR, obj.GetNamespace(), sbName); err != nil && !apierrors.IsNotFound(err) {
 		r.Log.Warn("cascade claim delete: sandbox", "err", err)

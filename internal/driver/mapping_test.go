@@ -97,10 +97,7 @@ func TestMapVolumesPVCAndTmpfs(t *testing.T) {
 		{Name: "data", MountPath: "/data"},
 		{Name: "scratch", MountPath: "/scratch"},
 	}
-	spec, _, err := MapPodSpec(pod, MappingMeta{
-		Namespace: "n", SandboxName: "s",
-		VolumeNames: map[string]string{"data": "las-n-data-sb"},
-	}, 8888)
+	spec, _, err := MapPodSpec(pod, MappingMeta{Namespace: "n", SandboxName: "s"}, 8888)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +118,34 @@ func TestMapVolumesPVCAndTmpfs(t *testing.T) {
 	}
 	if tmpfs == nil || !tmpfs.Tmpfs {
 		t.Errorf("tmpfs mount = %+v", tmpfs)
+	}
+}
+
+// TestMapPreexistingPVCByClaimName verifies a pod volume referencing a
+// user-created PVC (not from a volumeClaimTemplate) resolves to the docker
+// volume derived from its claimName.
+func TestMapPreexistingPVCByClaimName(t *testing.T) {
+	pod := basePod()
+	pod.Volumes = []corev1.Volume{
+		{Name: "shared", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-data", ReadOnly: true}}},
+	}
+	pod.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "shared", MountPath: "/shared"}}
+	spec, warnings, err := MapPodSpec(pod, MappingMeta{Namespace: "team-a", SandboxName: "s"}, 8888)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+	if len(spec.Mounts) != 1 {
+		t.Fatalf("mounts = %+v", spec.Mounts)
+	}
+	m := spec.Mounts[0]
+	if m.VolumeName != VolumeName("team-a", "shared-data") {
+		t.Errorf("volume = %q, want %q", m.VolumeName, VolumeName("team-a", "shared-data"))
+	}
+	if !m.ReadOnly {
+		t.Error("persistentVolumeClaim.readOnly should propagate to the mount")
 	}
 }
 

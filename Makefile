@@ -29,9 +29,11 @@ tidy:
 
 lint: fmt vet
 
-# Docker-backed integration + E2E tests (opt in).
+# Docker-backed integration + E2E tests (opt in). -p 1 serializes the test
+# packages: they share one Docker daemon and their cleanups sweep las.managed
+# containers, so parallel package binaries interfere.
 integration:
-	LASD_DOCKER_TESTS=1 $(GO) test -count=1 -timeout 20m ./internal/driver/... ./internal/reconciler/... ./test/e2e/...
+	LASD_DOCKER_TESTS=1 $(GO) test -count=1 -timeout 20m -p 1 ./internal/driver/... ./internal/reconciler/... ./internal/portforward/... ./test/e2e/...
 
 # Build the bundled runtime image directly (lasd also builds it on demand).
 runtime-image:

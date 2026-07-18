@@ -64,12 +64,14 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    # Remove the quarantine xattr so the binary runs without a Gatekeeper prompt.
+    # On macOS only, clear the Gatekeeper quarantine xattr so the binary runs
+    # without a "developer cannot be verified" prompt. Guarded so it is a no-op
+    # on Linux (no /usr/bin/xattr) and never fails the install.
     hooks:
       post:
         install: |
-          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/lasd"]
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/lasd"], must_succeed: false
           end
     caveats: |
       lasd needs a running Docker daemon (Docker Desktop, Colima, or OrbStack).

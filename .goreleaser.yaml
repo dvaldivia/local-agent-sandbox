@@ -1,0 +1,80 @@
+# goreleaser config for lasd. Cut a release by pushing a tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# CI (.github/workflows/release.yml) then builds binaries, a checksums file, a
+# GitHub Release, and updates the Homebrew tap.
+version: 2
+
+project_name: lasd
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: lasd
+    main: ./cmd/lasd
+    binary: lasd
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: lasd
+    formats: [tar.gz]
+    name_template: "lasd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - docs/*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:", "Merge pull request", "Merge branch"]
+
+release:
+  github:
+    owner: dvaldivia
+    name: local-agent-sandbox
+  prerelease: auto
+
+# Homebrew tap (cask; Homebrew's recommended path for prebuilt binaries):
+#   brew install dvaldivia/tap/lasd
+homebrew_casks:
+  - name: lasd
+    # Skip publishing the cask when no tap token is configured, so the release
+    # (binaries + GitHub Release) still succeeds. Once the HOMEBREW_TAP_GITHUB_TOKEN
+    # secret is set, the cask is pushed to the tap automatically.
+    skip_upload: '{{ if .Env.HOMEBREW_TAP_GITHUB_TOKEN }}false{{ else }}true{{ end }}'
+    repository:
+      owner: dvaldivia
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/dvaldivia/local-agent-sandbox"
+    description: "Run kubernetes-sigs/agent-sandbox locally on Docker"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # Remove the quarantine xattr so the binary runs without a Gatekeeper prompt.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/lasd"]
+          end
+    caveats: |
+      lasd needs a running Docker daemon (Docker Desktop, Colima, or OrbStack).
+
+      Start the local control plane:
+        lasd serve
+      Point your tooling and the agent-sandbox SDKs at it:
+        export KUBECONFIG=~/.local/share/local-agent-sandbox/kubeconfig

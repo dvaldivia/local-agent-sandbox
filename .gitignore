@@ -1,0 +1,16 @@
+# binaries
+/bin/
+/dist/
+/lasd
+*.test
+*.out
+# local state
+*.db
+.lasd/
+# editor
+.DS_Store
+.idea/
+.vscode/
+# reference clones are read-only inputs, keep out of our module's VCS
+/reference/
+/.claude/

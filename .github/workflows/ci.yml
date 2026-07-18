@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main, implement-plan]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - name: gofmt
+        run: test -z "$(gofmt -l internal cmd test)"
+      - name: vet
+        run: go vet ./...
+      - name: runtime module vet
+        run: cd runtime && go vet ./...
+
+  unit:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - name: unit + contract tests (Docker tests auto-skip)
+        run: go test ./...
+      - name: runtime module tests
+        run: cd runtime && go test ./...
+      - name: race
+        run: go test -race ./internal/store/... ./internal/kubefacade/... ./internal/reconciler/...
+
+  integration-linux:
+    runs-on: ubuntu-latest # Docker preinstalled
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - name: Docker-backed driver/reconciler/E2E tests
+        env:
+          LASD_DOCKER_TESTS: "1"
+        run: go test -count=1 -timeout 20m ./internal/driver/... ./internal/reconciler/... ./test/e2e/...
+
+  integration-macos:
+    runs-on: macos-latest
+    continue-on-error: true # promote to required once Colima proves stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - name: start colima
+        run: |
+          brew install colima docker
+          colima start --vm-type vz
+      - name: Docker-backed tests
+        env:
+          LASD_DOCKER_TESTS: "1"
+        run: go test -count=1 -timeout 25m ./internal/driver/... ./test/e2e/...
